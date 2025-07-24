@@ -1,8 +1,8 @@
 # Load the pre-trained classifier model
 import pickle
 import pandas as pd
-with open('rf_classifier.pkl', 'rb') as model_file:
-    rf_classifier = pickle.load(model_file)
+with open('best_model.pkl', 'rb') as model_file:
+    svm = pickle.load(model_file)
 
 
 def pipe(df_eda):
@@ -14,7 +14,7 @@ def pipe(df_eda):
     df_eda.drop(to_drop, axis=1, inplace=True)
     from datetime import datetime
 
-    "Purchase History	Policy Start Date	Policy Renewal Date"
+    # "Purchase History	Policy Start Date	Policy Renewal Date"
     current_date = datetime.now()
     df_eda['purchase age'] = (current_date - df_eda['Purchase History']).dt.days/365.25
     df_eda['policy age'] = (df_eda['Policy Renewal Date'] - df_eda['Policy Start Date']).dt.days/365.25
@@ -28,37 +28,46 @@ def pipe(df_eda):
 
     for col in object_columns:
         df_eda[col] = label_encoder.fit_transform(df_eda[col])
-    def preprocess_text(text):
-        text = re.sub(r'[^a-zA-Z\s]', '', text)
-        text = text.lower()
-        tokens = word_tokenize(text)
-        tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stopwords.words('english')]
-        return ' '.join(tokens)
+    
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    df_eda['Claim_Description'] = df_eda['Claim_Description'].apply(preprocess_text)
-    from sklearn.feature_extraction.text import CountVectorizer
-    from nltk.tokenize import word_tokenize
-    import nltk
+    # Generate sentence embeddings
+    embeddings = model.encode(df_eda['Claim_Description'].tolist(), show_progress_bar=True)
 
-    nltk.download('punkt')
+    import numpy as np
+    embed_df = pd.DataFrame(embeddings, columns=[f'sbert_{i}' for i in range(embeddings.shape[1])])
 
-    df_eda['Claim_Description_Tokens'] = df_eda['Claim_Description'].apply(word_tokenize)
+    # Concatenate with original features
+    df_eda = pd.concat([df_eda.reset_index(drop=True), embed_df], axis=1)
 
-    vectorizer = CountVectorizer(max_features=500)
-    claim_description_one_hot = vectorizer.fit_transform(df_eda['Claim_Description']).toarray()
 
-    one_hot_columns = vectorizer.get_feature_names_out()
-    claim_description_one_hot_df = pd.DataFrame(claim_description_one_hot, columns=one_hot_columns)
-
-    df_eda = pd.concat([df_eda.drop(columns=['Claim_Description']), claim_description_one_hot_df], axis=1)
-    df_eda.dropna(inplace=True)
     from sklearn.preprocessing import MinMaxScaler
-    import re
-
+    df_eda.dropna(inplace=True)
     numeric_columns = df_eda.select_dtypes(include=['float64', 'int64']).columns
     df_eda[numeric_columns] = MinMaxScaler().fit_transform(df_eda[numeric_columns])
 
     # df_eda.head()
+    # 2. Extract weights and bias
+    w = svm.coef_.flatten()      # shape (n_features,)
+    b = svm.intercept_[0]
 
-    y_pred_proba = rf_classifier.predict_proba(df_eda)
-    return y_pred_proba[0][0]
+    # 3. Get the raw feature vector for our single example
+    x = df_eda.iloc[0].values.astype(float)  # ensure numeric dtype
+
+    # 4. Compute contributions
+    contribs = w * x
+
+    # 5. Pair with feature names, sort by descending contribution
+    feat_contrib = list(zip(df_eda.columns, contribs))
+    feat_contrib_sorted = sorted(feat_contrib, key=lambda x: x[1], reverse=True)
+
+    # 6. Take top 3 positive and top 2 negative for context
+    top_pos = feat_contrib_sorted[:3]
+    top_neg = feat_contrib_sorted[-2:]
+
+
+
+    y_pred_proba = svm.predict_proba(df_eda)
+
+    return y_pred_proba[0][0], top_pos, top_neg, feat_contrib_sorted
